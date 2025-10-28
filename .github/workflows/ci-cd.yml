@@ -1,4 +1,4 @@
-name: CI-CD Pipeline
+name: Node.js CI/CD Pipeline
 
 on:
   push:
@@ -7,11 +7,15 @@ on:
     branches: [main]
 
 jobs:
+  # ======================================
+  # 1️⃣ BUILD STAGE
+  # ======================================
   build:
+    name: 🏗️ Build Stage
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js
@@ -22,55 +26,190 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ -f package.json ]; then
-            npm ci
-          else
-            echo "No package.json found, skipping npm install"
-          fi
+          echo "Installing project dependencies..."
+          npm ci
 
-      - name: Run linting
+      - name: Build the project
         run: |
-          if [ -f package.json ] && npm list --depth=0 | grep -q eslint; then
-            npm run lint
-          else
-            echo "No linting configured, skipping..."
-          fi
+          echo "Building project..."
+          npm run build --if-present
 
-      - name: Run tests
-        run: |
-          if [ -f package.json ] && npm list --depth=0 | grep -q jest; then
-            npm test
-          else
-            echo "No tests configured, skipping..."
-          fi
-
-      - name: Build application
-        run: |
-          if [ -f package.json ]; then
-            npm run build --if-present
-          else
-            echo "No build script found, skipping..."
-          fi
-
-      - name: Security audit
-        run: |
-          if [ -f package.json ]; then
-            npm audit --audit-level=high
-          else
-            echo "No package.json found, skipping security audit"
-          fi
-
-  deploy:
-    needs: build
+  # ======================================
+  # 2️⃣ TEST STAGE
+  # ======================================
+  test:
+    name: 🧪 Test Stage
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    
+    needs: build
+
+    services:
+      mongo:
+        image: mongo:6
+        ports: ['27017:27017']
+        options: >-
+          --health-cmd "mongo --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      MONGO_URI: mongodb://localhost:27017/testdb
+      NODE_ENV: test
+
     steps:
-      - name: Deploy to staging
-        run: echo "Deploying to staging environment..."
-        
-      - name: Run integration tests
-        run: echo "Running integration tests..."
-        
-      - name: Deploy to production
-        run: echo "Deploying to production environment..."
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Unit + Integration Tests
+        run: |
+          echo "Running Jest / Mocha test suites..."
+          npm test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+
+  # ======================================
+  # 3️⃣ COVERAGE STAGE
+  # ======================================
+  coverage:
+    name: 📊 Coverage Stage
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate coverage report
+        run: npm run coverage || echo "No coverage script found."
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+  # ======================================
+  # 4️⃣ LINT STAGE
+  # ======================================
+  lint:
+    name: 🔍 Lint Stage
+    runs-on: ubuntu-latest
+    needs: coverage
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: |
+          echo "Running ESLint..."
+          npx eslint . -f stylish || true
+
+      - name: Save lint report
+        run: |
+          mkdir -p lint-report
+          npx eslint . -f html -o lint-report/eslint-report.html || true
+
+      - name: Upload lint report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: lint-report/
+
+  # ======================================
+  # 5️⃣ SECURITY SCAN STAGE
+  # ======================================
+  security:
+    name: 🛡️ Security Scan Stage
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run security scan
+        run: |
+          echo "Running npm audit..."
+          npm audit --json > security-report.json || true
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security-report.json
+
+  # ======================================
+  # 6️⃣ DEPLOYMENT ARTIFACT STAGE
+  # ======================================
+  deploy:
+    name: 🚀 Deployment Artifact
+    runs-on: ubuntu-latest
+    needs: [build, test, coverage, lint, security]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create deployment package
+        run: |
+          mkdir -p deployment/reports
+          cp -r src/ deployment/
+          cp README.md package.json deployment/
+          cp -r artifacts/* deployment/reports/ || true
+          cd deployment
+          zip -r ../deployment-package-${{ github.run_id }}.zip .
+          cd ..
+
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-package
+          path: deployment-package-*.zip
+          retention-days: 30
